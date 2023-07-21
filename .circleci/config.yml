@@ -1,0 +1,116 @@
+version: 2.1
+
+
+
+jobs:
+  build-and-test:
+    docker:
+      - image: cimg/python:3.10.2
+    steps:
+      - checkout
+      - restore_cache:
+          key: deps1-{{ .Branch }}-{{ checksum "requirements.txt" }}
+      - run:
+          name: Install python deps in a venv
+          command: |
+            sudo rm -rf venv
+            python -m venv venv
+            source venv/bin/activate
+            python -m pip install --upgrade pip
+            pip install -r requirements.txt
+      - save_cache:
+          key: deps1-{{ .Branch }}-{{ checksum "requirements.txt" }}
+          paths:
+            - "venv"
+      - run:
+          name: Linting
+          command: |
+            source venv/bin/activate
+            flake8
+      - run:
+          name: Tests
+          command: |
+            source venv/bin/activate
+            pytest
+
+  build-image:
+    parameters:
+      image_name:
+        type: string
+        default: lettings_site
+    docker:
+      - image: cimg/python:3.10.2
+    steps:
+      - checkout
+      - setup_remote_docker
+      - run:
+          name: Build docker image
+          command: |
+            docker build -t << parameters.image_name >> .
+      - run:
+          name: Archive Docker image
+          command: |
+            docker save -o image.tar << parameters.image_name >>
+      - persist_to_workspace:
+          root: .
+          paths:
+            - ./image.tar
+
+  publish-image:
+    parameters:
+      image_name:
+        type: string
+        default: lettings_site
+    docker:
+      - image: cimg/python:3.10.2
+    steps:
+      - attach_workspace:
+          at: /tmp/workspace
+      - setup_remote_docker
+      - run:
+          name: Load archived Docker image
+          command: |
+            docker load -i /tmp/workspace/image.tar
+      - run:
+          name: Publish Docker Image
+          command: |
+            echo $DOCKER_PASSWORD | docker login --username $DOCKER_USERNAME --password-stdin
+            docker tag << parameters.image_name >> $DOCKER_USERNAME/$DOCKER_REPOSITORY:$CIRCLE_SHA1
+            docker push $DOCKER_USERNAME/$DOCKER_REPOSITORY:$CIRCLE_SHA1
+
+  heroku-deploy:
+    parameters:
+      heroku_app_name:
+        type: string
+        default: letting
+    machine:
+      image: ubuntu-2204:2022.10.2
+    steps:
+      - checkout
+      - run:
+          name: build and deploy on heroku
+          command: |
+            curl https://cli-assets.heroku.com/install.sh | sh
+            HEROKU_API_KEY=$HEROKU_API_TOKEN heroku container:login
+            HEROKU_API_KEY=$HEROKU_API_TOKEN heroku config:set SECRET_KEY=$SECRET_KEY -a << parameters.heroku_app_name >>
+            HEROKU_API_KEY=$HEROKU_API_TOKEN heroku config:set SENTRY_DSN=$SENTRY_DSN -a << parameters.heroku_app_name >>
+            HEROKU_API_KEY=$HEROKU_API_TOKEN heroku container:push -a << parameters.heroku_app_name >> web
+            HEROKU_API_KEY=$HEROKU_API_TOKEN heroku container:release -a << parameters.heroku_app_name >> web
+
+workflows:
+  main:
+    jobs:
+      - build-and-test
+      - build-image:
+          requires:
+            - build-and-test
+          filters:
+            branches:
+              only:
+                - master
+      - publish-image:
+          requires:
+            - build-image
+      - heroku-deploy:
+          requires:
+            - publish-image

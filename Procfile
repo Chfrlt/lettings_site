@@ -1,0 +1,1 @@
+web: gunicorn lettings_site.wsgi:application --log-file -
